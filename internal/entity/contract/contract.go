@@ -1,6 +1,7 @@
 package entity
 
 import (
+	"fmt"
 	"time"
 )
 
@@ -11,17 +12,28 @@ type Contract struct {
 	ExpirationDate time.Time
 }
 
-type ContractSlice []Contract
-
-func (contracts ContractSlice) CheckExpiringContracts() (ContractSlice, error) {
+func FilterExpiringContracts(contracts []Contract) string {
+	var expiringContracts []Contract
 	now := time.Now()
-	var expiringContracts ContractSlice
+
+	message := "Contracts expiring in 90 days:\n"
 
 	for _, contract := range contracts {
 		if contract.ExpirationDate.Sub(now).Hours() <= 24*90 {
 			expiringContracts = append(expiringContracts, contract)
+			message += fmt.Sprintf(
+				"Contract: %s\nDescription: %s\nExpiration Date: %s\n\n",
+				contract.Number,
+				contract.Description,
+				contract.ExpirationDate.Format("2006-01-02"),
+			)
 		}
 	}
 
-	return expiringContracts, nil
+	// Check if there are expiring contracts, if not, return a different message
+	if len(expiringContracts) == 0 {
+		message = "No contracts expiring in 90 days."
+	}
+
+	return message
 }

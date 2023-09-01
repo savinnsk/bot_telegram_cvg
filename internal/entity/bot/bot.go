@@ -5,9 +5,9 @@ type Bot struct {
 	ChatIds  []int64
 }
 
-func NewBot(apiToken string, chatId []int64) *Bot {
+func NewBot(apiToken string, chatId []int64) (*Bot, error) {
 	return &Bot{
 		ApiToken: apiToken,
 		ChatIds:  chatId,
-	}
+	}, nil
 }

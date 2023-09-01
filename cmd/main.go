@@ -1,170 +1,102 @@
 package main
 
 import (
-	"encoding/csv"
 	"fmt"
+	bot "github.com.br/telegram_go_bot/internal/entity/bot"
+	contract "github.com.br/telegram_go_bot/internal/entity/contract"
+	cvg "github.com.br/telegram_go_bot/internal/infra/cvg"
+	telegram "github.com.br/telegram_go_bot/internal/infra/telegram"
 	"github.com/go-telegram-bot-api/telegram-bot-api/v5"
-	"io"
+	cron "github.com/robfig/cron/v3"
 	"log"
-	"os"
-	"time"
+	"strings"
 )
 
-type Contract struct {
-	Number         string
-	Description    string
-	StartDate      time.Time
-	ExpirationDate time.Time
-}
+func sendMessages(telegramClient *telegram.Telegram, botCredentials *bot.Bot) {
+	contracts, err := cvg.ParseContractsFromCSV("../database.csv")
 
-func parseContractsFromCSV(filePath string) ([]Contract, error) {
-	file, err := os.Open(filePath)
 	if err != nil {
-		return nil, err
+		println("contracts not found")
 	}
-	defer file.Close()
 
-	reader := csv.NewReader(file)
-	// Skip the header line
-	_, _ = reader.Read()
+	expiredContracts := contract.FilterExpiringContracts(contracts)
 
-	var contracts []Contract
-
-	for {
-		record, err := reader.Read()
-		if err == io.EOF {
-			break
-		}
+	for _, chatID := range botCredentials.ChatIds {
+		err := telegramClient.SendMessage(expiredContracts, chatID)
 		if err != nil {
-			return nil, err
+			fmt.Printf("Error sending message to chat %d: %v\n", chatID, err)
+		} else {
+			fmt.Printf("Message sent successfully to chat %d\n", chatID)
 		}
-
-		startDate, _ := time.Parse("2/1/2006", record[2])
-		expirationDate, _ := time.Parse("2/1/2006", record[3])
-
-		contract := Contract{
-			Number:         record[0],
-			Description:    record[1],
-			StartDate:      startDate,
-			ExpirationDate: expirationDate,
-		}
-
-		contracts = append(contracts, contract)
 	}
-
-	return contracts, nil
 }
 
-func handleCommand(command string, contracts []Contract, chatID int64, bot *tgbotapi.BotAPI) error {
-	if command == "/check_expired" {
-		var expiredContracts []Contract
-		now := time.Now()
+func handleIncomingMessages(telegramClient *telegram.Telegram, contracts []contract.Contract) {
+	u := tgbotapi.NewUpdate(0)
+	u.Timeout = 60
 
-		for _, contract := range contracts {
-			if contract.ExpirationDate.Before(now) {
-				expiredContracts = append(expiredContracts, contract)
+	updates := telegramClient.Connection.GetUpdatesChan(u)
+
+	for update := range updates {
+		if update.Message == nil {
+			continue
+		}
+
+		command := update.Message.Text
+		chatID := update.Message.Chat.ID
+
+		// Handle commands
+		if strings.HasPrefix(command, "/") {
+			err := telegramClient.HandleCommand(command, contracts, chatID)
+			if err != nil {
+				fmt.Printf("Error handling command %s: %v\n", command, err)
 			}
 		}
-
-		if len(expiredContracts) > 0 {
-			message := "Expired contracts:\n"
-			for _, contract := range expiredContracts {
-				message += fmt.Sprintf(
-					"Contract: %s\nDescription: %s\nExpiration Date: %s\n\n",
-					contract.Number,
-					contract.Description,
-					contract.ExpirationDate.Format("2006-01-02"),
-				)
-			}
-			msg := tgbotapi.NewMessage(chatID, message)
-			_, err := bot.Send(msg)
-			return err
-		}
-
-		msg := tgbotapi.NewMessage(chatID, "No contracts have expired.")
-		_, err := bot.Send(msg)
-		return err
-	} else if command == "/start" {
-		msg := tgbotapi.NewMessage(chatID, fmt.Sprintf("Você foi conectado seu id é : %d", chatID))
-		_, err := bot.Send(msg)
-		return err
 	}
-
-	msg := tgbotapi.NewMessage(chatID, "Unknown command.")
-	_, err := bot.Send(msg)
-	return err
-}
-
-func checkExpiringContracts(contracts []Contract) []Contract {
-	now := time.Now()
-	var expiringContracts []Contract
-
-	for _, contract := range contracts {
-		if contract.ExpirationDate.Sub(now).Hours() <= 24*90 {
-			expiringContracts = append(expiringContracts, contract)
-		}
-	}
-
-	return expiringContracts
 }
 
 func main() {
-	bot, err := tgbotapi.NewBotAPI("6609285497:AAHEUgqCRjrn6_3WzplFFgGJ64VgDPuzsDk")
+
+	botCredentials, err := bot.NewBot("YOUR_BOT_TOKEN", []int64{1 /*YOUR_CHAT_ID*/})
+
 	if err != nil {
-		log.Panic(err)
+		panic(err)
 	}
 
-	bot.Debug = true
+	telegram, err := telegram.InitConnection(botCredentials.ApiToken)
 
-	log.Printf("Authorized on account %s", bot.Self.UserName)
-
-	contracts, err := parseContractsFromCSV("./database.csv")
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
 
-	// Set the time to send messages (e.g., 9:00 AM)
-	targetHour := 0
-	targetMinute := 1
+	telegram.Connection.Debug = true
 
-	for {
-		// Get the current time
-		now := time.Now()
+	log.Printf("Authorized on account %s", telegram.Connection.Self.UserName)
 
-		// Calculate the time of the next target hour
-		nextTargetTime := now.Add(time.Duration(targetHour)*time.Hour + time.Duration(targetMinute)*time.Minute)
-		if now.After(nextTargetTime) {
-			nextTargetTime = nextTargetTime.Add(24 * time.Hour)
+	go func() {
+		contracts, err := cvg.ParseContractsFromCSV("../database.csv")
+
+		if err != nil {
+			println("contracts not found")
 		}
 
-		// Calculate the duration until the next target time
-		initialDelay := nextTargetTime.Sub(now)
+		handleIncomingMessages(telegram, contracts)
+	}()
 
-		// Wait for the initial delay
-		time.Sleep(initialDelay)
+	c := cron.New()
 
-		expiringContracts := checkExpiringContracts(contracts)
-		if len(expiringContracts) > 0 {
-			message := "Contracts expiring in 90 days:\n"
-			for _, contract := range expiringContracts {
-				message += fmt.Sprintf(
-					"Contract: %s\nDescription: %s\nExpiration Date: %s\n\n",
-					contract.Number,
-					contract.Description,
-					contract.ExpirationDate.Format("2006-01-02"),
-				)
-			}
+	// Add TIME a cron job to send messages
+	_, err = c.AddFunc("* * * * *", func() {
+		sendMessages(telegram, botCredentials)
+	})
 
-			// Send the warning message to your desired chat ID
-			// Replace CHAT_ID with the actual chat ID
-			chatID := int64(6252881817)
-			warningMsg := tgbotapi.NewMessage(chatID, message)
-			_, err := bot.Send(warningMsg)
-			if err != nil {
-				log.Println("Error sending warning:", err)
-			}
-		}
-
+	if err != nil {
+		panic(err)
 	}
+	// Start the cron job scheduler
+	c.Start()
+
+	// Keep the program running indefinitely (or until terminated)
+	select {}
 
 }
